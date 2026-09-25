@@ -2,7 +2,7 @@
 
 ブラウザで画像をドローンショー風の光点に変換する静的Webアプリです。PNG・JPG / JPEG・GIFを最大3素材まで組み合わせられます。画像解析、GIFデコード、ショーの描画はユーザーの端末内で行い、選択した画像をサーバーへアップロードしません。ログインは不要です。
 
-公開予定URL（GitHub Pagesを有効化後）: https://ryg4mk.github.io/my-drone-show/
+公開URL: https://ryg4mk.github.io/my-drone-show/
 
 ## 使い方
 
