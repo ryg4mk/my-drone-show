@@ -33,7 +33,7 @@ function buildFrames(inputs,requestedCount,representatives,blankFrames){
     if(!points.length&&blankFrames.has(i))points=Array.from({length:count},()=>({x:2,y:2,r:0,g:0,b:0}));
     return points;
   });
-  if(frames.some(points=>points.length<count))throw new Error('いずれかの画像で指定機数に必要な輪郭が見つかりませんでした。画像や範囲を変更してください。');
+  if(frames.some(points=>points.length<count))throw new Error('いずれかの素材で有効な輪郭が見つかりませんでした。画像や範囲を変更してください。');
   return {count,frames:matchFrames(frames)};
 }
 export function planFrames(inputs,requestedCount=0,gif=false){

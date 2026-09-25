@@ -76,26 +76,58 @@ function placePoints(data,width,height,count,candidates){
   if(!Number.isInteger(count)||count<1||count>2000)throw new Error('Drone limit: 1–2000');
   const unique=new Map();for(const p of candidates){const key=`${p.x},${p.y}`;if(!unique.has(key)||unique.get(key).weight<p.weight)unique.set(key,p);}candidates=[...unique.values()];
   if(!candidates.length)return [];
-  // When the image has only a few short lines, subdivide along connected line
-  // segments. Never scatter extra target points into the flat interior.
+  const size=Math.max(width,height);
+  const output=p=>({x:(p.x-width/2)/size,y:(p.y-height/2)/size,r:p.r,g:p.g,b:p.b});
+  // A line is a graph of adjacent edge pixels. Preserve every detected mark,
+  // then distribute the remaining drones along its connected segments. This
+  // has a fixed cost per segment and does not create a giant candidate array.
   if(candidates.length<count){
-    const grid=new Map(candidates.map((p,i)=>[`${Math.floor(p.x)},${Math.floor(p.y)}`,i])),segments=[];
-    for(let i=0;i<candidates.length;i++){const p=candidates[i];for(const [dx,dy] of [[1,0],[0,1],[1,1],[-1,1]]){const j=grid.get(`${Math.floor(p.x)+dx},${Math.floor(p.y)+dy}`);if(j!==undefined&&candidates[j].component===p.component)segments.push([p,candidates[j]]);}}
-    if(!segments.length)return [];
-    const base=candidates;
-    for(let divisions=Math.max(2,Math.ceil(count/segments.length)*2);;divisions*=2){
-      const expanded=new Map(base.map(p=>[`${p.x},${p.y}`,p]));
-      for(const [a,b] of segments)for(let k=1;k<divisions;k++){const t=k/divisions,x=a.x+(b.x-a.x)*t,y=a.y+(b.y-a.y)*t;if(data[(Math.floor(y)*width+Math.floor(x))*4+3]===0)continue;expanded.set(`${x.toFixed(5)},${y.toFixed(5)}`,{...(t<.5?a:b),x,y});}
-      candidates=[...expanded.values()];if(candidates.length>=count||divisions>=4096)break;
+    const grid=new Map(candidates.map((p,i)=>[`${Math.floor(p.x)},${Math.floor(p.y)}`,i]));
+    const neighbor=(x,y)=>grid.get(`${x},${y}`);
+    const segments=[];let totalWeight=0;
+    for(const a of candidates){
+      const x=Math.floor(a.x),y=Math.floor(a.y);
+      for(const [dx,dy] of [[1,0],[0,1],[1,1],[-1,1]]){
+        const j=neighbor(x+dx,y+dy);if(j===undefined)continue;
+        const b=candidates[j];if(a.component!==b.component)continue;
+        // A corner with an orthogonal connection should not also get a
+        // crossing diagonal. It would double the lights at the intersection.
+        if(dx&&dy&&[neighbor(x+dx,y),neighbor(x,y+dy)].some(k=>k!==undefined&&candidates[k].component===a.component))continue;
+        const mx=Math.floor((a.x+b.x)/2),my=Math.floor((a.y+b.y)/2);
+        if(!data[(my*width+mx)*4+3])continue;
+        const priority=((a.priority??.7)+(b.priority??.7))/2;
+        const weight=Math.hypot(dx,dy)*Math.max(.35,Math.min(3.5,(a.weight+b.weight)/2))*(.75+.5*priority);
+        segments.push({a,b,weight,allocated:0,remainder:0});totalWeight+=weight;
+      }
     }
+    // A dotted but visible drawing can have no adjacent edge pixels. Keep it
+    // playable by treating each detected mark as a very short subpixel stroke.
+    // This fallback never adds lights to an unrelated flat region.
+    if(!segments.length&&candidates.length>=8)for(const p of candidates){
+      const a={...p,x:p.x-.22},b={...p,x:p.x+.22};
+      const weight=Math.max(.35,Math.min(3.5,p.weight))*.44;
+      segments.push({a,b,weight,allocated:0,remainder:0});totalWeight+=weight;
+    }
+    if(!segments.length)return [];
+    const extra=count-candidates.length,result=candidates.map(output);
+    let assigned=0;
+    for(const segment of segments){const quota=extra*segment.weight/totalWeight;segment.allocated=Math.floor(quota);segment.remainder=quota-segment.allocated;assigned+=segment.allocated;}
+    const residual=segments.slice().sort((a,b)=>b.remainder-a.remainder||b.weight-a.weight);
+    for(let i=0;i<extra-assigned;i++)residual[i].allocated++;
+    for(const {a,b,allocated} of segments)for(let i=0;i<allocated;i++){
+      const t=(i+.5)/allocated;
+      const color=t<.5?a:b;
+      result.push(output({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,r:color.r,g:color.g,b:color.b}));
+    }
+    return result;
   }
   const nearest=new Float32Array(candidates.length);nearest.fill(Infinity);const used=new Uint8Array(candidates.length),result=[];let best=0;
   // Keep the exact requested count, but consume well-spaced edge locations
   // before adding lights to a crowded section of the same line.
   const spacing=count>=1900?1.7:count>=1400?1.4:1.1,spacing2=spacing*spacing;
   for(let i=1;i<candidates.length;i++)if(candidates[i].weight>candidates[best].weight)best=i;
-  for(let k=0;k<Math.min(count,candidates.length);k++){
-    const p=candidates[best];used[best]=1;result.push({x:(p.x-width/2)/Math.max(width,height),y:(p.y-height/2)/Math.max(width,height),r:p.r,g:p.g,b:p.b});let score=-1,next=0;
+  for(let k=0;k<count;k++){
+    const p=candidates[best];used[best]=1;result.push(output(p));let score=-1,next=0;
     for(let i=0;i<candidates.length;i++){if(used[i])continue;const q=candidates[i],distance=(q.x-p.x)**2+(q.y-p.y)**2;if(distance<nearest[i])nearest[i]=distance;const s=nearest[i]*Math.min(4,q.weight)*(nearest[i]<spacing2?.08:1);if(s>score){score=s;next=i;}}best=next;
   }
   return result;
@@ -135,12 +167,12 @@ function planLines(data,width,height,photo=false,requestedCount=0){
   if(!candidates.length)return {points:[],count:0,metrics:{lineLength:0,parts:0}};
   function budget(list,parts){
     const length=list.reduce((sum,p)=>sum+p.priority,0)*512/Math.max(width,height);
-    const amount=Math.round((250+Math.max(0,length-700)*(photo?.052:.085)+Math.min(parts,30)*2)/10)*10;
-    return {count:Math.min(1000,Math.max(250,amount)),length};
+    const amount=Math.round((280+Math.max(0,length-1200)*(photo?.11:.15)+Math.min(parts,45)*(photo?7:10))/10)*10;
+    return {count:Math.min(2000,Math.max(300,amount)),length};
   }
   let estimate=budget(candidates,retained.length);
   retained=retained.slice(0,Math.max(18,Math.floor((requestedCount||estimate.count)/9)));candidates=retained.flatMap(g=>g.points);estimate=budget(candidates,retained.length);
-  const points=placePoints(data,width,height,requestedCount|| (photo?Math.round(estimate.count*.8):estimate.count),candidates);
+  const points=placePoints(data,width,height,requestedCount||estimate.count,candidates);
   return {points,count:points.length,metrics:{lineLength:Math.round(estimate.length),parts:retained.length}};
 }
 
@@ -149,11 +181,22 @@ export function planShow(data,width,height,requestedCount=0){
   const classification=classifyImage(data,width,height);
   if(classification.kind==='illustration'){const result=planLines(data,width,height,false,requestedCount);return {...result,metrics:{...result.metrics,kind:'illustration',surfaceCount:0}};}
   const image=simplifyPhoto(data,width,height),result=planLines(image.data,image.width,image.height,true,requestedCount);
-  const lineBudget=requestedCount?Math.ceil(requestedCount*.8):result.count;
-  const fill=surfacePoints(image.original,image.width,image.height,result.points.slice(0,lineBudget),requestedCount?Math.max(0,requestedCount-lineBudget):Math.min(1000-result.count,Math.round(result.count/4)));
-  const selected=requestedCount?[...result.points.slice(0,lineBudget),...fill,...result.points.slice(lineBudget,lineBudget+Math.max(0,requestedCount-lineBudget-fill.length))]:[...result.points,...fill];
+  const target=requestedCount||result.count,lineBudget=Math.ceil(target*.8);
+  const fill=surfacePoints(image.original,image.width,image.height,result.points.slice(0,lineBudget),Math.max(0,target-lineBudget));
+  const selected=[...result.points.slice(0,lineBudget),...fill,...result.points.slice(lineBudget,lineBudget+Math.max(0,target-lineBudget-fill.length))];
   // Display original photo colors, never palette-center colors. Recheck alpha
   // at the original resolution after resizing and point normalization.
-  const points=selected.map(p=>{const x=Math.max(0,Math.min(width-1,Math.floor(p.x*Math.max(width,height)+width/2))),y=Math.max(0,Math.min(height-1,Math.floor(p.y*Math.max(width,height)+height/2))),i=(y*width+x)*4;return data[i+3]?{...p,r:data[i],g:data[i+1],b:data[i+2]}:null;}).filter(Boolean).slice(0,requestedCount||1000);
+  const size=Math.max(width,height);
+  const points=selected.map(p=>{
+    const px=p.x*size+width/2,py=p.y*size+height/2,x=Math.max(0,Math.min(width-1,Math.floor(px))),y=Math.max(0,Math.min(height-1,Math.floor(py)));
+    let best=-1,bx=x,by=y;
+    for(let radius=0;radius<=4&&best<0;radius++)for(let dy=-radius;dy<=radius&&best<0;dy++)for(let dx=-radius;dx<=radius&&best<0;dx++){
+      if(radius&&Math.max(Math.abs(dx),Math.abs(dy))!==radius)continue;
+      const xx=x+dx,yy=y+dy;if(xx<0||xx>=width||yy<0||yy>=height)continue;
+      const i=(yy*width+xx)*4;if(data[i+3]){best=i;bx=xx;by=yy;break;}
+    }
+    if(best<0)return null;
+    return {...p,x:p.x+(bx-x)/size,y:p.y+(by-y)/size,r:data[best],g:data[best+1],b:data[best+2]};
+  }).filter(Boolean).slice(0,target);
   return {points,count:points.length,metrics:{...result.metrics,kind:'photo',surfaceCount:fill.length,analysisWidth:image.width,analysisHeight:image.height}};
 }
